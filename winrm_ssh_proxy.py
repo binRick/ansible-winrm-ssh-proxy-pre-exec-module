@@ -45,7 +45,7 @@ command sudo command iptables -t nat -A POSTROUTING -d {{remote.host}} -p tcp --
 LocalCommand="echo OK > /tmp/lc"
 LogLevel="ERROR"
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
-SSH_OPTIONS="-q -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oLocalCommand=\\\"${LocalCommand}\\\" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
+SSH_OPTIONS="-q -oGatewayPorts=no -oExitOnForwardFailure=yes -oClearAllForwardings=yes -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oLocalCommand=\\\"${LocalCommand}\\\" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
 SSH_OPTIONS_PROXY="-oProxyCommand=\\\"{{bastion.ProxyCommand}}\\\""
 SSH_OPTIONS_BATCH="-oBatchMode=yes -oPasswordAuthentication=no -oKbdInteractiveAuthentication=no -oChallengeResponseAuthentication=no"
 PROXY_SSH_CMD="command ssh $SSH_OPTIONS $SSH_OPTIONS_BATCH $SSH_OPTIONS_PROXY -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.host}}"
