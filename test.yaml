@@ -1,0 +1,8 @@
+- name: test pb
+  hosts: all
+  gather_facts: no
+  user: root
+  tasks:
+    - command: hostname
+      register: j
+    - debug: var=j.stdout

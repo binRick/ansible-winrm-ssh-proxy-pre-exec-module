@@ -18,12 +18,10 @@ TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
 DEBUG_MODE = True
 DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-#           'remote': {'host':'45.56.64.246','port':22},            # ssh 
-#           'remote': {'host':'172.217.164.78','port':443},         # google.com
-           'remote': {'host':'104.24.123.146','port':80},           # http ifconfig.io
+           'remote': {'host':'10.187.7.15','port':22},
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
-           'bastion': {'host':'vpn299','user':'root','port':22},
-           'timeout': 10,
+           'bastion': {'host':'10.187.7.11','user':'root','port':22},
+           'timeout': 300,
            'interval': 1,
 }
 OPEN_PORTS_CMD = """
@@ -200,28 +198,6 @@ class CallbackModule(CallbackBase):
     def v2_runner_on_ok(self, result):
       host_vars = self.VARIABLE_MANAGER.get_vars()['hostvars'][result._host.name]
       print("[v2_runner_on_ok] ({}) {}".format(result._host.name, host_vars))
-
-    def v2_playbook_on_play_start(self, play):
-        target_host='vpn299'
-        var_name='ansible_ssh_host'
-        var_vaue='45.56.64.247'
-        self.VARIABLE_MANAGER.set_host_variable(target_host, var_name, var_value)
-
-        #self._display.display(play)
-        #extra_vars = self.VARIABLE_MANAGER.extra_vars
-        #self._display.display(' [INFO]: "use_tags" variable is not set, but "enable_use_tags" is set', color='cyan')
-        #self._display.display(' [{}]: {}'.format('v2_playbook_on_play_start',extra_vars), color='cyan')
-
-#        os.environ['ANSIBLE_S
-        PLAY_NAME = play.get_name().strip()
-        if not PLAY_NAME:
-            PLAY_NAME = 'unnamed'
-        self.VARIABLE_MANAGER = play.get_variable_manager()
-#.get_vars()['hostvars'].values())
-        print("[v2_playbook_on_play_start] ({}) {}".format(PLAY_NAME,list(self.VARIABLE_MANAGER.get_vars()['hostvars'].values())))
-
-#[0]['inventory_hostname']
-        sys.exit(1)
 
     def v2_playbook_on_start(self, playbook):
         PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
