@@ -15,15 +15,15 @@ del os.environ['http_proxy']
 del os.environ['https_proxy']
 
 LOCAL_ADDRESS = '127.150.190.200'
-PORT_RANGE_START = 15000
+PORT_RANGE_START = 18000
 AUTO_DELETE_TUNNEL_SCRIPTS = False
 TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
 DEBUG_MODE = True
 DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-           'remote': {'host':'10.187.7.204','port':5986},
+           'remote': {'host':'10.110.10.31','port':5986},
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
-           'bastion': {'host':'10.187.7.11','user':'root','port':22},
+           'bastion': {'host':'xxxxx-bastion','user':'rblundell@xxxxxxxxxx','port':22,"ProxyCommand":"ssh -W %h:%p rblundell@xxxxxxx@adminlinuxjumpserver.xxxxxxx"},
            'timeout': 600,
            'interval': 2,
 }
@@ -41,7 +41,7 @@ command sudo command iptables -t nat -A POSTROUTING -d {{remote.host}} -p tcp --
 
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
 
-exec command ssh -F/dev/null -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oProxyCommand=none -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.user}}@{{bastion.host}} "sleep {{timeout}}"
+exec command ssh -oProxyCommand="{{bastion.ProxyCommand}}" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oProxyCommand=none -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.user}}@{{bastion.host}} "sleep {{timeout}}"
 """
 
 with warnings.catch_warnings():
