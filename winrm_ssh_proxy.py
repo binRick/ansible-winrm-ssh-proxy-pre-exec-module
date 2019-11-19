@@ -202,6 +202,11 @@ class CallbackModule(CallbackBase):
       print("[v2_runner_on_ok] ({}) {}".format(result._host.name, host_vars))
 
     def v2_playbook_on_play_start(self, play):
+        target_host='vpn299'
+        var_name='ansible_ssh_host'
+        var_vaue='45.56.64.247'
+        self.VARIABLE_MANAGER.set_host_variable(target_host, var_name, var_value)
+
         #self._display.display(play)
         #extra_vars = self.VARIABLE_MANAGER.extra_vars
         #self._display.display(' [INFO]: "use_tags" variable is not set, but "enable_use_tags" is set', color='cyan')
