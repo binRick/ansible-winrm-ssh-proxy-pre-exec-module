@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import (absolute_import, division, print_function)
-import itertools, logging, os, pwd, warnings, sys, subprocess, tempfile, json, time
+import itertools, logging, os, pwd, warnings, sys, subprocess, tempfile, json, time, atexit
 from ansible import __version__ as ansible_version
 from jinja2 import Environment
 from ansible.module_utils.basic import AnsibleModule
@@ -10,32 +10,37 @@ from hashlib import sha256
 from threading import Thread
 from multiprocessing import Queue
 
+LOCAL_ADDRESS = '127.150.190.200'
+PORT_RANGE_START = 15000
+AUTO_DELETE_TUNNEL_SCRIPTS = False
+TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
+DEBUG_MODE = True
+DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-           'remote': {'host':'142.250.9.138','port':443},
-           'local': {'host':'127.0.0.150','port':15000},
+#           'remote': {'host':'45.56.64.246','port':22},            # ssh 
+#           'remote': {'host':'172.217.164.78','port':443},         # google.com
+           'remote': {'host':'104.24.123.146','port':80},           # http ifconfig.io
+           'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
            'bastion': {'host':'vpn299','user':'root','port':22},
            'timeout': 600,
            'interval': 1,
 }
-AUTO_DELETE_TUNNEL_SCRIPTS = False
-TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
 OPEN_PORTS_CMD = """
 command netstat -alnt|command grep LISTEN|command grep '^tcp '|command tr -s ' '|command cut -d' ' -f4| command grep ^{{local.host}}|command cut -d':' -f2|command sort|command uniq
 """
 
 SSH_TUNNEL_SCRIPT = """
 #!/bin/bash
-set -e
-set -x
+set -xe
+cd /
 
 command sudo command iptables -t nat -A OUTPUT -d {{remote.host}} -p tcp --dport {{remote.port}} -j DNAT --to-destination {{local.host}}:{{local.port}}
 command sudo command iptables -t nat -A POSTROUTING -d {{remote.host}} -p tcp --dport {{remote.port}} -j MASQUERADE
 
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
 
-command ssh -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -L{{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.user}}@{{bastion.host}} "sleep {{timeout}}"
+exec command ssh -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -L{{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.user}}@{{bastion.host}} "sleep {{timeout}}"
 """
-DEBUG_MODE = True
 
 with warnings.catch_warnings():
     warnings.filterwarnings('ignore')
@@ -58,10 +63,9 @@ def normalizeScriptContents(S):
     return "\n".join(LINES)
 
 def renderSshTunnelScript(SSH_TUNNEL_OBJECT):
-    S = Environment().from_string(SSH_TUNNEL_SCRIPT).render(
+    return normalizeScriptContents(Environment().from_string(SSH_TUNNEL_SCRIPT).render(
         SSH_TUNNEL_OBJECT,
-    ).strip()
-    return normalizeScriptContents(S)
+    ).strip())
 
 
 class AsynchronousFileReader(Thread):
@@ -72,7 +76,6 @@ class AsynchronousFileReader(Thread):
         self._fd = fd
         self._queue = queue
         self._proc = proc
-
     def run(self):
       try:
         for line in iter(self._fd.readline, ''):
@@ -88,7 +91,6 @@ class AsynchronousFileReader(Thread):
             time.sleep(.01)
             self._proc.terminate()
             return True
-
         return not self.is_alive() and self._queue.empty()
 
 
@@ -99,37 +101,47 @@ class CallbackModule(CallbackBase):
 
     def __init__(self):
         super(CallbackModule, self).__init__()
-        self.taskresult = None
-        self.task = None
-        self.play = None
-        self.playbook = None
-        self.stats = None
-        self.tunnel_process = None
-        self.cwd = '/'
         self.env = json.loads(json.dumps(os.environ.copy()))
-        self.shell = True
-        self.pid = None
-        self.processStartTime = None
+        self.shell = False
+        self.proc = None
+        self.netstat = None
+
+    def cleanupProcess(self):
+        try:
+            print("[cleanupProcess]")
+            if self.proc and self.proc.pid > 0 :
+                print("[cleanupProcess] Terminating {}".format(PID))
+                self.proc.kill()
+                os.kill(self.proc.pid)
+                time.sleep(1.0)
+                EXIT_CODE = self.proc.returncode
+                print("[cleanupProcess]    PID = {}".format(self.proc.pid))
+                print("[cleanupProcess]    EXIT_CODE = {}".format(EXIT_CODE))
+        except Exception as e:
+            pass
 
     def setupTunnelProcess(self):
         processStartTime = int(time.time())
-        netstat = {'ports':[]}
-        self.OPEN_PORTS_CMD = Environment().from_string(OPEN_PORTS_CMD).render(SSH_TUNNEL_OBJECT).strip()
-        proc = subprocess.Popen(self.OPEN_PORTS_CMD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.cwd, env=self.env, shell=True)
-        netstat['stdout'], netstat['stderr'] = proc.communicate()
-        netstat['exit_code'] = proc.wait()
-        netstat['stdout'] = netstat['stdout'].decode()
-        netstat['stderr'] = netstat['stderr'].decode()
-        
-        for p in netstat['stdout'].strip().split("\n"):
-            netstat['ports'].append(p.strip())
+        atexit.register(self.cleanupProcess)
 
-        if netstat['exit_code'] != 0:
+        self.netstat = {'ports':[]}
+        self.OPEN_PORTS_CMD = Environment().from_string(OPEN_PORTS_CMD).render(SSH_TUNNEL_OBJECT).strip()
+        self.proc = subprocess.Popen(self.OPEN_PORTS_CMD, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd='/', env=self.env, shell=True)
+        self.netstat['stdout'], self.netstat['stderr'] = self.proc.communicate()
+        self.netstat['exit_code'] = self.proc.wait()
+        self.netstat['stdout'] = self.netstat['stdout'].decode()
+        self.netstat['stderr'] = self.netstat['stderr'].decode()
+        
+        for p in self.netstat['stdout'].strip().split("\n"):
+            self.netstat['ports'].append(p.strip())
+
+        if self.netstat['exit_code'] != 0:
             raise Exception('Unable to check locally listening ports :: {}'.format(self.OPEN_PORTS_CMD))    
 
-        while SSH_TUNNEL_OBJECT['local']['port'] in netstat['ports']:
+        while SSH_TUNNEL_OBJECT['local']['port'] in self.netstat['ports']:
             SSH_TUNNEL_OBJECT['local']['port'] += 1
-
+            if SSH_TUNNEL_OBJECT['local']['port'] > 65000:
+                raise Exception("Unable to allocate local port!")
         SCRIPT_CONTENTS = renderSshTunnelScript(SSH_TUNNEL_OBJECT)
         SCRIPT_PATH = tempfile.NamedTemporaryFile(suffix=TUNNEL_SCRIPT_SUFFIX,delete=AUTO_DELETE_TUNNEL_SCRIPTS).name
         with open(SCRIPT_PATH,'w') as f:
@@ -137,22 +149,22 @@ class CallbackModule(CallbackBase):
             os.chmod(SCRIPT_PATH, 0o755)
 
         self.cmd = SCRIPT_PATH
-        stdoutLines = []
-        stderrLines = []
         SSH_TUNNEL_PROCESS_IS_RUNNING = True
         processStartTime = int(time.time())
         if DEBUG_MODE:
-            print(self.cmd)
             print(SSH_TUNNEL_OBJECT)
-        proc2 = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.cwd, shell=self.shell, env=os.environ.copy())
+
+
+        stdoutLines = []
+        stderrLines = []
+        self.proc = subprocess.Popen(self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd='/', shell=self.shell, env=os.environ.copy())
 
         stdout_queue = Queue()
-        stdout_reader = AsynchronousFileReader(proc2.stdout, stdout_queue, proc2)
+        stdout_reader = AsynchronousFileReader(self.proc.stdout, stdout_queue, self.proc)
         stdout_reader.start()
         stderr_queue = Queue()
-        stderr_reader = AsynchronousFileReader(proc2.stderr, stderr_queue, proc2)
+        stderr_reader = AsynchronousFileReader(self.proc.stderr, stderr_queue, self.proc)
         stderr_reader.start()
-        self.pid = proc2.pid
 
         while not stdout_reader.eof() or not stderr_reader.eof():
             while not stderr_queue.empty():
@@ -162,17 +174,16 @@ class CallbackModule(CallbackBase):
                 line = stdout_queue.get()
                 stdoutLines.append(line)
 
-        proc2.stdout.close()
-        proc2.stderr.close()
-
-        exit_code = proc2.wait()
+        self.proc.stdout.close()
+        self.proc.stderr.close()
+        exit_code = self.proc.wait()
         processEndTime = int(time.time())
         processRunTime = processEndTime - processStartTime
 
         return {
-            "netstat": netstat,
+            "netstat": self.netstat,
             "cmd": self.cmd,
-            "pid": self.pid,
+            "pid": self.proc.pid,
             "exit_code": exit_code,
             "processStartTime": processStartTime,
             "processEndTime": processEndTime,
@@ -184,6 +195,7 @@ class CallbackModule(CallbackBase):
             'SCRIPT_PATH': SCRIPT_PATH,
         }
 
+
     def v2_playbook_on_start(self, playbook):
         PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
         TUNNEL_RESULT = self.setupTunnelProcess()
@@ -192,8 +204,7 @@ class CallbackModule(CallbackBase):
           'PLAYBOOK_PATH': PLAYBOOK_PATH,
           'TUNNEL_PROCESS': json.loads(json.dumps(TUNNEL_RESULT)),
         }
-        with open('/tmp/kkkkkkk','w') as f1:
-            f1.write(json.dumps(SETUP))
-
-
-
+        if DEBUG_MODE:
+            print("DEBUG_SETUP_FILE={}".format(DEBUG_SETUP_FILE))
+            with open(DEBUG_SETUP_FILE,'w') as f1:
+                f1.write(json.dumps(SETUP))
