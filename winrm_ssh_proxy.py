@@ -9,6 +9,7 @@ from ansible.module_utils._text import to_text
 from hashlib import sha256
 from threading import Thread
 from multiprocessing import Queue
+from ansible.parsing.dataloader import DataLoader
 
 LOCAL_ADDRESS = '127.150.190.200'
 PORT_RANGE_START = 15000
@@ -22,7 +23,7 @@ SSH_TUNNEL_OBJECT = {
            'remote': {'host':'104.24.123.146','port':80},           # http ifconfig.io
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
            'bastion': {'host':'vpn299','user':'root','port':22},
-           'timeout': 600,
+           'timeout': 10,
            'interval': 1,
 }
 OPEN_PORTS_CMD = """
@@ -105,6 +106,7 @@ class CallbackModule(CallbackBase):
         self.shell = False
         self.proc = None
         self.netstat = None
+        self.VARIABLE_MANAGER = None
 
     def cleanupProcess(self):
         try:
@@ -195,6 +197,26 @@ class CallbackModule(CallbackBase):
             'SCRIPT_PATH': SCRIPT_PATH,
         }
 
+    def v2_runner_on_ok(self, result):
+      host_vars = self.VARIABLE_MANAGER.get_vars()['hostvars'][result._host.name]
+      print("[v2_runner_on_ok] ({}) {}".format(result._host.name, host_vars))
+
+    def v2_playbook_on_play_start(self, play):
+        #self._display.display(play)
+        #extra_vars = self.VARIABLE_MANAGER.extra_vars
+        #self._display.display(' [INFO]: "use_tags" variable is not set, but "enable_use_tags" is set', color='cyan')
+        #self._display.display(' [{}]: {}'.format('v2_playbook_on_play_start',extra_vars), color='cyan')
+
+#        os.environ['ANSIBLE_S
+        PLAY_NAME = play.get_name().strip()
+        if not PLAY_NAME:
+            PLAY_NAME = 'unnamed'
+        self.VARIABLE_MANAGER = play.get_variable_manager()
+#.get_vars()['hostvars'].values())
+        print("[v2_playbook_on_play_start] ({}) {}".format(PLAY_NAME,list(self.VARIABLE_MANAGER.get_vars()['hostvars'].values())))
+
+#[0]['inventory_hostname']
+        sys.exit(1)
 
     def v2_playbook_on_start(self, playbook):
         PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
