@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import (absolute_import, division, print_function)
-import itertools, logging, os, pwd, warnings, sys, subprocess, tempfile, json, time, atexit
+import itertools, logging, os, pwd, warnings, sys, subprocess, tempfile, json, time, atexit, threading
 from ansible import __version__ as ansible_version
 from jinja2 import Environment
 from ansible.module_utils.basic import AnsibleModule
@@ -14,6 +14,8 @@ from ansible.parsing.dataloader import DataLoader
 del os.environ['http_proxy']
 del os.environ['https_proxy']
 
+TUNNEL_AVAILABLE = threading.Event()
+TUNNEL = None
 LOCAL_ADDRESS = '127.150.190.200'
 PORT_RANGE_START = 18000
 AUTO_DELETE_TUNNEL_SCRIPTS = False
@@ -21,9 +23,9 @@ TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
 DEBUG_MODE = True
 DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-           'remote': {'host':'10.110.10.31','port':5986},
+           'remote': {'host':'10.187.22.222','port':5986},
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
-           'bastion': {'host':'xxxxx-bastion','user':'rblundell@xxxxxxxxxx','port':22,"ProxyCommand":"ssh -W %h:%p rblundell@xxxxxxx@adminlinuxjumpserver.xxxxxxx"},
+           'bastion': {'host':'observium.xxxxxxxxx','user':'rblundell@xxxxxxxxxx','port':22,"ProxyCommand":"ssh -W %h:%p rblundell@xxxxxxxxxx@adminlinuxjumpserver.xxxxxxxxxxxxxx"},
            'timeout': 600,
            'interval': 2,
 }
@@ -33,15 +35,42 @@ command netstat -alnt|command grep LISTEN|command grep '^tcp '|command tr -s ' '
 
 SSH_TUNNEL_SCRIPT = """
 #!/bin/bash
-set -xe
+set -e
+set +x
 cd /
 
 command sudo command iptables -t nat -A OUTPUT -d {{remote.host}} -p tcp --dport {{remote.port}} -j DNAT --to-destination {{local.host}}:{{local.port}}
 command sudo command iptables -t nat -A POSTROUTING -d {{remote.host}} -p tcp --dport {{remote.port}} -j MASQUERADE
 
+LocalCommand="echo OK > /tmp/lc"
+LogLevel="ERROR"
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
+SSH_OPTIONS="-q -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oLocalCommand=\\\"${LocalCommand}\\\" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
+SSH_OPTIONS_PROXY="-oProxyCommand=\\\"{{bastion.ProxyCommand}}\\\""
+SSH_OPTIONS_BATCH="-oBatchMode=yes -oPasswordAuthentication=no -oKbdInteractiveAuthentication=no -oChallengeResponseAuthentication=no"
+PROXY_SSH_CMD="command ssh $SSH_OPTIONS $SSH_OPTIONS_BATCH $SSH_OPTIONS_PROXY -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.host}}"
+PROXY_SSH_COPY_ID_CMD="command ssh-copy-id $SSH_OPTIONS {{bastion.host}}"
 
-exec command ssh -oProxyCommand="{{bastion.ProxyCommand}}" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oProxyCommand=none -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.user}}@{{bastion.host}} "sleep {{timeout}}"
+PROXY_SSH_CMD_TEST="${PROXY_SSH_CMD} pwd"
+PROXY_SSH_CMD_SLEEP="${PROXY_SSH_CMD} sleep {{timeout}}"
+echo "PROXY_SSH_CMD_TEST=$PROXY_SSH_CMD_TEST"
+echo "PROXY_SSH_CMD_SLEEP=$PROXY_SSH_CMD_SLEEP"
+set +e
+eval "$PROXY_SSH_CMD_TEST"
+exit_code=$?
+if [[ "$exit_code" != "0" ]]; then
+    echo Failed to test ssh cmd
+    clear
+#    echo "Ensuring Bastion host \"{{bastion.host}}\" has public key..."
+#    eval "$PROXY_SSH_COPY_ID_CMD"
+#    echo "OK"
+#    exit_code=$?
+#    if [[ "$exit_code" != "0" ]]; then
+#        echo Failed to execute ssh-copy-id cmd
+#        exit $exit_code
+#    fi
+fi
+eval "$PROXY_SSH_CMD_SLEEP"
 """
 
 with warnings.catch_warnings():
@@ -106,7 +135,10 @@ class CallbackModule(CallbackBase):
         self.env = json.loads(json.dumps(os.environ.copy()))
         self.shell = False
         self.proc = None
+        self.hosts = None
         self.netstat = None
+        self.play = None
+        self.loader = None
         self.VARIABLE_MANAGER = None
 
     def cleanupProcess(self):
@@ -150,11 +182,12 @@ class CallbackModule(CallbackBase):
         with open(SCRIPT_PATH,'w') as f:
             f.write(SCRIPT_CONTENTS)
             os.chmod(SCRIPT_PATH, 0o755)
-
+        
         self.cmd = SCRIPT_PATH
         SSH_TUNNEL_PROCESS_IS_RUNNING = True
         processStartTime = int(time.time())
         if DEBUG_MODE:
+            print(SCRIPT_PATH)
             print(SSH_TUNNEL_OBJECT)
 
 
@@ -173,9 +206,12 @@ class CallbackModule(CallbackBase):
             while not stderr_queue.empty():
                 stderr = stderr_queue.get()
                 stderrLines.append(stderr)
+                print('stderr> {}'.format(stderr))
+                print(stderr)
             while not stdout_queue.empty():
-                line = stdout_queue.get()
-                stdoutLines.append(line)
+                stdout = stdout_queue.get()
+                stdoutLines.append(stdout)
+                print('stdout> {}'.format(stdout))
 
         self.proc.stdout.close()
         self.proc.stderr.close()
@@ -183,7 +219,10 @@ class CallbackModule(CallbackBase):
         processEndTime = int(time.time())
         processRunTime = processEndTime - processStartTime
 
-        return {
+        time.sleep(15.0)
+        TUNNEL_AVAILABLE.set()
+        global TUNNEL
+        TUNNEL = {
             "netstat": self.netstat,
             "cmd": self.cmd,
             "pid": self.proc.pid,
@@ -198,18 +237,39 @@ class CallbackModule(CallbackBase):
             'SCRIPT_PATH': SCRIPT_PATH,
         }
 
+
+
+
+    def v2_playbook_on_play_start(self, *args, **kwargs):
+        logging.debug("v2_playbook_on_play_start(self, *args, **kwargs)")
+        self.play = args[0]  # Workaround for https://github.com/ansible/ansible/issues/13948
+        self.loader = args[0]._loader
+        self.hosts = args[0].get_variable_manager()._inventory.get_hosts()
+
+
     def v2_playbook_on_start(self, playbook):
         PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
-#        TUNNEL_RESULT = self.setupTunnelProcess()
         TUNNEL_THREAD = Thread(target=self.setupTunnelProcess, args=[])
-        TUNNEL_THREAD.thread = True
+        TUNNEL_THREAD.daemon = True
         TUNNEL_THREAD.start()
 
-        time.sleep(8.0)
+        time.sleep(10.0)
+
+        """
+        while not TUNNEL_AVAILABLE.wait(timeout=30):
+            print('\r{}% done...'.format(0), end='', flush=True)
+            time.sleep(0.01)
+        print('\r{}% done...'.format(100))
+        """
+
+        time.sleep(0.01)
+        print('The tunnel state is {}'.format(TUNNEL))
 
         SETUP = {
           'PLAYBOOK_PATH': PLAYBOOK_PATH,
-#          'TUNNEL_PROCESS': json.loads(json.dumps(TUNNEL_RESULT)),
+          'HOSTS': self.hosts,
+          'PLAY': self.play,
+          'LOADER': self.loader,
         }
         if DEBUG_MODE:
             print("DEBUG_SETUP_FILE={}".format(DEBUG_SETUP_FILE))
