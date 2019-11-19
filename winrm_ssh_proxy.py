@@ -11,6 +11,9 @@ from threading import Thread
 from multiprocessing import Queue
 from ansible.parsing.dataloader import DataLoader
 
+del os.environ['http_proxy']
+del os.environ['https_proxy']
+
 LOCAL_ADDRESS = '127.150.190.200'
 PORT_RANGE_START = 15000
 AUTO_DELETE_TUNNEL_SCRIPTS = False
@@ -18,11 +21,11 @@ TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
 DEBUG_MODE = True
 DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-           'remote': {'host':'10.187.7.15','port':22},
+           'remote': {'host':'10.187.7.204','port':5986},
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
            'bastion': {'host':'10.187.7.11','user':'root','port':22},
-           'timeout': 300,
-           'interval': 1,
+           'timeout': 600,
+           'interval': 2,
 }
 OPEN_PORTS_CMD = """
 command netstat -alnt|command grep LISTEN|command grep '^tcp '|command tr -s ' '|command cut -d' ' -f4| command grep ^{{local.host}}|command cut -d':' -f2|command sort|command uniq
@@ -38,7 +41,7 @@ command sudo command iptables -t nat -A POSTROUTING -d {{remote.host}} -p tcp --
 
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
 
-exec command ssh -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -L{{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.user}}@{{bastion.host}} "sleep {{timeout}}"
+exec command ssh -F/dev/null -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oProxyCommand=none -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.user}}@{{bastion.host}} "sleep {{timeout}}"
 """
 
 with warnings.catch_warnings():
@@ -195,17 +198,18 @@ class CallbackModule(CallbackBase):
             'SCRIPT_PATH': SCRIPT_PATH,
         }
 
-    def v2_runner_on_ok(self, result):
-      host_vars = self.VARIABLE_MANAGER.get_vars()['hostvars'][result._host.name]
-      print("[v2_runner_on_ok] ({}) {}".format(result._host.name, host_vars))
-
     def v2_playbook_on_start(self, playbook):
         PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
-        TUNNEL_RESULT = self.setupTunnelProcess()
+#        TUNNEL_RESULT = self.setupTunnelProcess()
+        TUNNEL_THREAD = Thread(target=self.setupTunnelProcess, args=[])
+        TUNNEL_THREAD.thread = True
+        TUNNEL_THREAD.start()
+
+        time.sleep(8.0)
 
         SETUP = {
           'PLAYBOOK_PATH': PLAYBOOK_PATH,
-          'TUNNEL_PROCESS': json.loads(json.dumps(TUNNEL_RESULT)),
+#          'TUNNEL_PROCESS': json.loads(json.dumps(TUNNEL_RESULT)),
         }
         if DEBUG_MODE:
             print("DEBUG_SETUP_FILE={}".format(DEBUG_SETUP_FILE))
