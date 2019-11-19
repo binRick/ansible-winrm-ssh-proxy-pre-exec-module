@@ -1,7 +1,19 @@
 #!/bin/bash
-set -e
-set +x
+set -xe
+REMOTE_FQDN=google.com
+REMOTE_HOST="$(dig -4 $REMOTE_FQDN +short|head -n1)"
+REMOTE_PORT=443
+LOCAL_HOST=127.0.0.150
+LOCAL_PORT=15000
+PROTO=https
 
-curl -k https://74.125.136.101:443
+echo REMOTE DOMAIN
+curl -4k $PROTO://$REMOTE_FQDN:$REMOTE_PORT
 
-curl -k https://127.0.0.100:10443
+sleep 1
+echo REMOTE HOST
+curl -4k $PROTO://$REMOTE_HOST:$REMOTE_PORT
+
+sleep 1
+echo LOCAL
+curl -v4k $PROTO://$LOCAL_HOST:$LOCAL_PORT
