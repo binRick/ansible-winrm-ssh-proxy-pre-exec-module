@@ -24,9 +24,9 @@ TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
 DEBUG_MODE = True
 DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-           'remote': {'host':'10.187.22.222','port':5986},
+           'remote': {'host':os.environ['REMOTE_HOST']'port':os.environ['REMOTE_PORT']},
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
-           'bastion': {'host':'observium.xxxxxxxxx','user':'rblundell@xxxxxxxxxx','port':22,"ProxyCommand":"ssh -W %h:%p rblundell@xxxxxxxxxx@adminlinuxjumpserver.xxxxxxxxxxxxxx"},
+           'bastion': {'host':os.environ['BASTION_HOST'],'user':os.environ['BASTION_USER'],'port':os.environ['BASTION_PORT'],"ProxyCommand":os.environ['BASTION_PROXY_COMMAND']},
            'timeout': 600,
            'interval': 2,
 }
@@ -46,7 +46,7 @@ command sudo command iptables -t nat -A POSTROUTING -d {{remote.host}} -p tcp --
 LocalCommand="echo OK > /tmp/lc"
 LogLevel="ERROR"
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
-SSH_OPTIONS="-q -oGatewayPorts=no -oExitOnForwardFailure=yes -oClearAllForwardings=yes -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oLocalCommand=\\\"${LocalCommand}\\\" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
+SSH_OPTIONS="-q -oGatewayPorts=no -oExitOnForwardFailure=yes -oClearAllForwardings=no -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oLocalCommand=\\\"${LocalCommand}\\\" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
 SSH_OPTIONS_PROXY="-oProxyCommand=\\\"{{bastion.ProxyCommand}}\\\""
 SSH_OPTIONS_BATCH="-oBatchMode=yes -oPasswordAuthentication=no -oKbdInteractiveAuthentication=no -oChallengeResponseAuthentication=no"
 PROXY_SSH_CMD="command ssh $SSH_OPTIONS $SSH_OPTIONS_BATCH $SSH_OPTIONS_PROXY -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.host}}"
