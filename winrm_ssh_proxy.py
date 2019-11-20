@@ -11,8 +11,9 @@ from threading import Thread
 from multiprocessing import Queue
 from ansible.parsing.dataloader import DataLoader
 
-del os.environ['http_proxy']
-del os.environ['https_proxy']
+for k in ['http_proxy','https_proxy']:
+    if k in os.environ.keys():
+       del os.environ[k]
 
 TUNNEL_AVAILABLE = threading.Event()
 TUNNEL = None
