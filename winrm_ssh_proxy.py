@@ -16,8 +16,10 @@ for k in ['http_proxy','https_proxy']:
        del os.environ[k]
 
 DEBUG_MODE = True
-MONITOR_TUNNEL_INTERVAL = 1.0
-TUNNEL_AVAILABLE_ACTIVATION_DELAY = 2.5
+MONITOR_TUNNEL_INTERVAL = 5.0
+IPTABLES_POLL_LOCK_INTERVAL_SECONDS = 10
+CLEANUP_IPTABLES_RULES_ON_EXIT = True
+TUNNEL_AVAILABLE_ACTIVATION_DELAY = 0.1
 TUNNEL_AVAILABLE = threading.Event()
 TUNNEL = None
 LOCAL_ADDRESS = '127.150.190.200'
@@ -26,17 +28,31 @@ AUTO_DELETE_TUNNEL_SCRIPTS = False
 TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
 DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-           'remote': {'host':os.environ['REMOTE_HOST'],'port':os.environ['REMOTE_PORT']},
+           'remotes': [
+                {'host':os.environ['REMOTE_HOST'],'port':os.environ['REMOTE_PORT']},
+#                {'host':'10.2.3.4', 'port': '2929'},
+            ],
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
            'bastion': {'host':os.environ['BASTION_HOST'],'user':os.environ['BASTION_USER'],'port':os.environ['BASTION_PORT'],"ProxyCommand":os.environ['BASTION_PROXY_COMMAND']},
            'timeout': 600,
            'interval': 2,
+           'IPTABLES_POLL_LOCK_INTERVAL_SECONDS': "{}".format(IPTABLES_POLL_LOCK_INTERVAL_SECONDS),
 }
 OPEN_PORTS_CMD = """command netstat -alnt|command grep LISTEN|command grep '^tcp '|command tr -s ' '|command cut -d' ' -f4| command grep ^{{local.host}}|command cut -d':' -f2|command sort|command uniq"""
 
 GET_DNATS_CMD = """command sudo command iptables -L -n -t nat| command grep 'to:{}:' | command grep 'tcp dpt' | command grep ^DNAT| command tr -s ' '""".format(LOCAL_ADDRESS)
-GET_MASQUERADES_CMD = """command sudo command iptables -L -n -t nat|grep ^MASQ| grep dpt:{{remote.port}}$|tr -s ' '|grep '0.0.0.0/0 {{remote.host}} tcp dpt:'"""
+GET_MASQUERADES_CMD = """
+{%for remote in remotes%}
+command sudo command iptables -L -n -t nat|grep ^MASQ| grep dpt:{{remote.port}}$|tr -s ' '|grep '0.0.0.0/0 {{remote.host}} tcp dpt:'
+{%endfor%}
+"""
 
+DELETE_DNATS_CMD = """
+{%for remote in remotes%}
+command sudo command iptables -t nat -D OUTPUT -d {{remote.host}} -p tcp --dport {{remote.port}} -j DNAT --to-destination {{local.host}}:{{local.port}}
+command sudo command iptables -t nat -D POSTROUTING -d {{remote.host}} -p tcp --dport {{remote.port}} -j MASQUERADE
+{%endfor%}
+"""
 
 SSH_TUNNEL_SCRIPT = """
 #!/bin/bash
@@ -44,16 +60,18 @@ set -e
 set +x
 cd /
 
+{%for remote in remotes%}
 command sudo command iptables -t nat -A OUTPUT -d {{remote.host}} -p tcp --dport {{remote.port}} -j DNAT --to-destination {{local.host}}:{{local.port}}
 command sudo command iptables -t nat -A POSTROUTING -d {{remote.host}} -p tcp --dport {{remote.port}} -j MASQUERADE
+{%endfor%}
 
 LocalCommand="echo OK > /tmp/lc"
 LogLevel="ERROR"
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
-SSH_OPTIONS="-q -oGatewayPorts=no -oExitOnForwardFailure=yes -oClearAllForwardings=no -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oLocalCommand=\\\"${LocalCommand}\\\" -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
+SSH_OPTIONS="-q -oGatewayPorts=no -oExitOnForwardFailure=yes -oClearAllForwardings=no -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
 SSH_OPTIONS_PROXY="-oProxyCommand=\\\"{{bastion.ProxyCommand}}\\\""
 SSH_OPTIONS_BATCH="-oBatchMode=yes -oPasswordAuthentication=no -oKbdInteractiveAuthentication=no -oChallengeResponseAuthentication=no"
-PROXY_SSH_CMD="command ssh $SSH_OPTIONS $SSH_OPTIONS_BATCH $SSH_OPTIONS_PROXY -L {{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}} {{bastion.host}}"
+PROXY_SSH_CMD="command ssh $SSH_OPTIONS $SSH_OPTIONS_BATCH $SSH_OPTIONS_PROXY {%for remote in remotes%} -L{{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}}{%endfor%} {{bastion.host}}"
 PROXY_SSH_COPY_ID_CMD="command ssh-copy-id $SSH_OPTIONS {{bastion.host}}"
 
 PROXY_SSH_CMD_TEST="${PROXY_SSH_CMD} pwd"
@@ -66,14 +84,6 @@ exit_code=$?
 if [[ "$exit_code" != "0" ]]; then
     echo Failed to test ssh cmd
     clear
-#    echo "Ensuring Bastion host \"{{bastion.host}}\" has public key..."
-#    eval "$PROXY_SSH_COPY_ID_CMD"
-#    echo "OK"
-#    exit_code=$?
-#    if [[ "$exit_code" != "0" ]]; then
-#        echo Failed to execute ssh-copy-id cmd
-#        exit $exit_code
-#    fi
 fi
 eval "$PROXY_SSH_CMD_SLEEP"
 """
@@ -154,6 +164,21 @@ class CallbackModule(CallbackBase):
 
 
     def cleanupProcess(self):
+        if CLEANUP_IPTABLES_RULES_ON_EXIT:
+            while len(self.getDnats()) > 0 or len(self.getMasquerades()) > 0:
+                DELETE_IPTABLES_CMDS = normalizeScriptContents(Environment().from_string(DELETE_DNATS_CMD).render(
+                                            SSH_TUNNEL_OBJECT,
+                                       ).strip()).splitlines()
+                for l in DELETE_IPTABLES_CMDS:
+                    #print("DELETE_IPTABLES_CMD={}".format(l))
+                    proc = subprocess.Popen(l.split(' '), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, shell=False)
+                    out, err = proc.communicate()
+                    code = proc.wait()
+                    if code != 0:
+                        print("cmd={},out={},err={},code={}".format(l,out,err,code))
+                time.sleep(0.5)
+
+
         try:
             if DEBUG_MODE:
                 print("[cleanupProcess]")
@@ -167,7 +192,7 @@ class CallbackModule(CallbackBase):
                 except Exception as e:
                     pass
 
-                time.sleep(1.0)
+                time.sleep(0.5)
                 EXIT_CODE = self.proc.returncode
                 if DEBUG_MODE:
                     print("[cleanupProcess]    PID = {}".format(self.proc.pid))
@@ -175,7 +200,7 @@ class CallbackModule(CallbackBase):
         except Exception as e:
             pass
 
-    def monitorTunnelThread(self):
+    def monitorTunnelThread(self, HOSTS):
         TUNNEL_FIRST_AVAILABLE_TIMESTAMP = None
         TUNNEL_LAST_AVAILABLE_TIMESTAMP = None
         TUNNEL_LAST_UNAVAILABLE_TIMESTAMP = None
@@ -185,9 +210,7 @@ class CallbackModule(CallbackBase):
             DNATS = self.getDnats()
             MASQUERADES = self.getMasquerades()
             if DEBUG_MODE:
-                print("Detected {} DNAT Rules...".format(len(DNATS)))
-                print("Detected {} MASQUERADE Rules...".format(len(MASQUERADES)))
-                print(MASQUERADES)
+                print("Detected {} DNAT Rules and {} MASQUERADE Rules...".format(len(DNATS),len(MASQUERADES)))
             if tunnelSocketOpen() and len(DNATS)>0 and len(MASQUERADES)>0:
                 if DEBUG_MODE:
                     print("[monitorTunnelThread] TUNNEL IS AVAILABLE")
@@ -233,8 +256,8 @@ class CallbackModule(CallbackBase):
 
     def getDnats(self):
         CMD = Environment().from_string(GET_DNATS_CMD).render(SSH_TUNNEL_OBJECT).strip()
-        if DEBUG_MODE:
-            print("[getDnats] CMD = {}".format(CMD))
+        #if DEBUG_MODE:
+        #    print("[getDnats] CMD = {}".format(CMD))
         proc = subprocess.Popen(CMD, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd='/', shell=True, universal_newlines=True)
         out, err = proc.communicate()
         out = out.splitlines()
@@ -258,7 +281,8 @@ class CallbackModule(CallbackBase):
                 })
         return DNATS
 
-    def setupTunnelProcess(self):
+    def setupTunnelProcess(self, HOSTS):
+        print('[setupTunnelProcess] HOSTS: {}'.format(HOSTS))
         processStartTime = int(time.time())
         atexit.register(self.cleanupProcess)
 
@@ -280,6 +304,8 @@ class CallbackModule(CallbackBase):
             SSH_TUNNEL_OBJECT['local']['port'] += 1
             if SSH_TUNNEL_OBJECT['local']['port'] > 65000:
                 raise Exception("Unable to allocate local port!")
+
+
         SCRIPT_CONTENTS = renderSshTunnelScript(SSH_TUNNEL_OBJECT)
         SCRIPT_PATH = tempfile.NamedTemporaryFile(suffix=TUNNEL_SCRIPT_SUFFIX,delete=AUTO_DELETE_TUNNEL_SCRIPTS).name
         with open(SCRIPT_PATH,'w') as f:
@@ -340,19 +366,21 @@ class CallbackModule(CallbackBase):
         }
 
     def v2_playbook_on_play_start(self, *args, **kwargs):
+        print('[v2_playbook_on_play_start]')
         logging.debug("v2_playbook_on_play_start(self, *args, **kwargs)")
         self.play = args[0]  # Workaround for https://github.com/ansible/ansible/issues/13948
+        print('self.play={}'.format(self.play))
         self.loader = args[0]._loader
         self.hosts = args[0].get_variable_manager()._inventory.get_hosts()
+        print('self.hosts={}'.format(self.hosts))
 
 
-    def v2_playbook_on_start(self, playbook):
-        PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
 
-        TUNNEL_THREAD = Thread(target=self.setupTunnelProcess, args=[])
+
+        TUNNEL_THREAD = Thread(target=self.setupTunnelProcess, args=[self.hosts])
         TUNNEL_THREAD.daemon = True
 
-        TUNNEL_MONITOR_THREAD = Thread(target=self.monitorTunnelThread, args=[])
+        TUNNEL_MONITOR_THREAD = Thread(target=self.monitorTunnelThread, args=[self.hosts])
         TUNNEL_MONITOR_THREAD.daemon = True
 
         TUNNEL_THREAD.start()
@@ -361,17 +389,19 @@ class CallbackModule(CallbackBase):
         while not TUNNEL_AVAILABLE.wait(timeout=30):
             print('\r{}% done. Waiting for tunnel to become available..'.format(0), end='', flush=True)
             time.sleep(.5)
-
         print('\rThe tunnel state is available')
 
         SETUP = {
-          'PLAYBOOK_PATH': PLAYBOOK_PATH,
-          'HOSTS': self.hosts,
-          'PLAY': self.play,
-          'LOADER': self.loader,
+          #'PLAYBOOK_PATH': PLAYBOOK_PATH,
+          'HOSTS': "{}".format(self.hosts),
+          'PLAY': "{}".format(self.play),
+          #'LOADER': self.loader,
         }
         if DEBUG_MODE:
             print("DEBUG_SETUP_FILE={}".format(DEBUG_SETUP_FILE))
             with open(DEBUG_SETUP_FILE,'w') as f1:
                 f1.write(json.dumps(SETUP))
 
+    def v2_playbook_on_start(self, playbook):
+        PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
+        print('[v2_playbook_on_start]')
