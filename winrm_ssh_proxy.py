@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import (absolute_import, division, print_function)
-import itertools, logging, os, pwd, warnings, sys, subprocess, tempfile, json, time, atexit, threading
+import itertools, logging, os, pwd, warnings, sys, subprocess, tempfile, json, time, atexit, threading, psutil
 from ansible import __version__ as ansible_version
 from jinja2 import Environment
 from ansible.module_utils.basic import AnsibleModule
@@ -15,24 +15,28 @@ for k in ['http_proxy','https_proxy']:
     if k in os.environ.keys():
        del os.environ[k]
 
+DEBUG_MODE = True
+MONITOR_TUNNEL_INTERVAL = 1.0
+TUNNEL_AVAILABLE_ACTIVATION_DELAY = 2.5
 TUNNEL_AVAILABLE = threading.Event()
 TUNNEL = None
 LOCAL_ADDRESS = '127.150.190.200'
 PORT_RANGE_START = 18000
 AUTO_DELETE_TUNNEL_SCRIPTS = False
 TUNNEL_SCRIPT_SUFFIX = '__winrm-proxy.sh'
-DEBUG_MODE = True
 DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
-           'remote': {'host':os.environ['REMOTE_HOST']'port':os.environ['REMOTE_PORT']},
+           'remote': {'host':os.environ['REMOTE_HOST'],'port':os.environ['REMOTE_PORT']},
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
            'bastion': {'host':os.environ['BASTION_HOST'],'user':os.environ['BASTION_USER'],'port':os.environ['BASTION_PORT'],"ProxyCommand":os.environ['BASTION_PROXY_COMMAND']},
            'timeout': 600,
            'interval': 2,
 }
-OPEN_PORTS_CMD = """
-command netstat -alnt|command grep LISTEN|command grep '^tcp '|command tr -s ' '|command cut -d' ' -f4| command grep ^{{local.host}}|command cut -d':' -f2|command sort|command uniq
-"""
+OPEN_PORTS_CMD = """command netstat -alnt|command grep LISTEN|command grep '^tcp '|command tr -s ' '|command cut -d' ' -f4| command grep ^{{local.host}}|command cut -d':' -f2|command sort|command uniq"""
+
+GET_DNATS_CMD = """command sudo command iptables -L -n -t nat| command grep 'to:{}:' | command grep 'tcp dpt' | command grep ^DNAT| command tr -s ' '""".format(LOCAL_ADDRESS)
+GET_MASQUERADES_CMD = """command sudo command iptables -L -n -t nat|grep ^MASQ| grep dpt:{{remote.port}}$|tr -s ' '|grep '0.0.0.0/0 {{remote.host}} tcp dpt:'"""
+
 
 SSH_TUNNEL_SCRIPT = """
 #!/bin/bash
@@ -88,6 +92,12 @@ except ImportError:
     except ImportError:
         cli_options = {}
 
+def tunnelSocketOpen():
+    for c in psutil.net_connections('inet4'):
+        if c.laddr.ip == SSH_TUNNEL_OBJECT['local']['host'] and c.laddr.port == SSH_TUNNEL_OBJECT['local']['port']:
+            return True
+    return False
+
 def normalizeScriptContents(S):
     LINES = []
     for l in S.split("\n"):
@@ -142,19 +152,111 @@ class CallbackModule(CallbackBase):
         self.loader = None
         self.VARIABLE_MANAGER = None
 
+
     def cleanupProcess(self):
         try:
-            print("[cleanupProcess]")
+            if DEBUG_MODE:
+                print("[cleanupProcess]")
             if self.proc and self.proc.pid > 0 :
-                print("[cleanupProcess] Terminating {}".format(PID))
-                self.proc.kill()
-                os.kill(self.proc.pid)
+                if DEBUG_MODE:
+                    print("[cleanupProcess] Terminating {}".format(PID))
+
+                try:
+                    self.proc.kill()
+                    os.kill(self.proc.pid)
+                except Exception as e:
+                    pass
+
                 time.sleep(1.0)
                 EXIT_CODE = self.proc.returncode
-                print("[cleanupProcess]    PID = {}".format(self.proc.pid))
-                print("[cleanupProcess]    EXIT_CODE = {}".format(EXIT_CODE))
+                if DEBUG_MODE:
+                    print("[cleanupProcess]    PID = {}".format(self.proc.pid))
+                    print("[cleanupProcess]    EXIT_CODE = {}".format(EXIT_CODE))
         except Exception as e:
             pass
+
+    def monitorTunnelThread(self):
+        TUNNEL_FIRST_AVAILABLE_TIMESTAMP = None
+        TUNNEL_LAST_AVAILABLE_TIMESTAMP = None
+        TUNNEL_LAST_UNAVAILABLE_TIMESTAMP = None
+        TUNNEL_LAST_CHECKED_TIMESTAMP = None
+        while True:
+            NOW = int(time.time())
+            DNATS = self.getDnats()
+            MASQUERADES = self.getMasquerades()
+            if DEBUG_MODE:
+                print("Detected {} DNAT Rules...".format(len(DNATS)))
+                print("Detected {} MASQUERADE Rules...".format(len(MASQUERADES)))
+                print(MASQUERADES)
+            if tunnelSocketOpen() and len(DNATS)>0 and len(MASQUERADES)>0:
+                if DEBUG_MODE:
+                    print("[monitorTunnelThread] TUNNEL IS AVAILABLE")
+                if not TUNNEL_FIRST_AVAILABLE_TIMESTAMP:
+                    TUNNEL_FIRST_AVAILABLE_TIMESTAMP = NOW
+                TUNNEL_LAST_AVAILABLE_TIMESTAMP = NOW
+                if not TUNNEL_AVAILABLE.is_set() and NOW > (TUNNEL_FIRST_AVAILABLE_TIMESTAMP + TUNNEL_AVAILABLE_ACTIVATION_DELAY):
+                    if DEBUG_MODE:
+                        print("[monitorTunnelThread] Activating Available Tunnel..")
+                    TUNNEL_AVAILABLE.set()
+            else:
+                TUNNEL_LAST_UNAVAILABLE_TIMESTAMP = NOW
+                TUNNEL_AVAILABLE.clear()
+                if DEBUG_MODE:
+                    print("[monitorTunnelThread] TUNNEL NOT AVAILABLE")
+
+            TUNNEL_LAST_CHECKED_TIMESTAMP = NOW
+            time.sleep(MONITOR_TUNNEL_INTERVAL)
+
+    def getMasquerades(self):
+        CMD = Environment().from_string(GET_MASQUERADES_CMD).render(SSH_TUNNEL_OBJECT).strip()
+        if DEBUG_MODE:
+            print("[getMasquerades] CMD = {}".format(CMD))
+
+        proc = subprocess.Popen(CMD, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd='/', shell=True, universal_newlines=True)
+        out, err = proc.communicate()
+        out = out.splitlines()
+        err = err.splitlines()
+        code = proc.wait()
+        if code != 0:
+            return []
+        MASQS = []
+        for l in out:
+            L = l.split(' ')
+            if len(L) == 7:
+                MASQS.append({
+                    'proto': L[1],
+                    'src': L[3],
+                    'dest': L[4],
+                    'dport': int(L[6].split(':')[1]),
+                })
+        return MASQS
+
+    def getDnats(self):
+        CMD = Environment().from_string(GET_DNATS_CMD).render(SSH_TUNNEL_OBJECT).strip()
+        if DEBUG_MODE:
+            print("[getDnats] CMD = {}".format(CMD))
+        proc = subprocess.Popen(CMD, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd='/', shell=True, universal_newlines=True)
+        out, err = proc.communicate()
+        out = out.splitlines()
+        err = err.splitlines()
+        code = proc.wait()
+        if code != 0:
+            return []
+        DNATS = []
+        for l in out:
+            L = l.split(' ')
+            if len(L) == 8:
+                DNATS.append({
+                    'proto': L[1],
+                    'src': L[3],
+                    'dest': L[4],
+                    'dport': int(L[6].replace('dpt:','')),
+                    'to': {
+                        'host': L[7].replace('to:','').split(':')[0],
+                        'port': int(L[7].replace('to:','').split(':')[1]),
+                    },
+                })
+        return DNATS
 
     def setupTunnelProcess(self):
         processStartTime = int(time.time())
@@ -207,12 +309,13 @@ class CallbackModule(CallbackBase):
             while not stderr_queue.empty():
                 stderr = stderr_queue.get()
                 stderrLines.append(stderr)
-                print('stderr> {}'.format(stderr))
-                print(stderr)
+                if DEBUG_MODE:
+                    print('stderr> {}'.format(stderr))
             while not stdout_queue.empty():
                 stdout = stdout_queue.get()
                 stdoutLines.append(stdout)
-                print('stdout> {}'.format(stdout))
+                if DEBUG_MODE:
+                    print('stdout> {}'.format(stdout))
 
         self.proc.stdout.close()
         self.proc.stderr.close()
@@ -220,8 +323,6 @@ class CallbackModule(CallbackBase):
         processEndTime = int(time.time())
         processRunTime = processEndTime - processStartTime
 
-        time.sleep(15.0)
-        TUNNEL_AVAILABLE.set()
         global TUNNEL
         TUNNEL = {
             "netstat": self.netstat,
@@ -238,9 +339,6 @@ class CallbackModule(CallbackBase):
             'SCRIPT_PATH': SCRIPT_PATH,
         }
 
-
-
-
     def v2_playbook_on_play_start(self, *args, **kwargs):
         logging.debug("v2_playbook_on_play_start(self, *args, **kwargs)")
         self.play = args[0]  # Workaround for https://github.com/ansible/ansible/issues/13948
@@ -250,21 +348,21 @@ class CallbackModule(CallbackBase):
 
     def v2_playbook_on_start(self, playbook):
         PLAYBOOK_PATH = os.path.abspath(playbook._file_name)
+
         TUNNEL_THREAD = Thread(target=self.setupTunnelProcess, args=[])
         TUNNEL_THREAD.daemon = True
+
+        TUNNEL_MONITOR_THREAD = Thread(target=self.monitorTunnelThread, args=[])
+        TUNNEL_MONITOR_THREAD.daemon = True
+
         TUNNEL_THREAD.start()
+        TUNNEL_MONITOR_THREAD.start()
 
-        time.sleep(10.0)
-
-        """
         while not TUNNEL_AVAILABLE.wait(timeout=30):
-            print('\r{}% done...'.format(0), end='', flush=True)
-            time.sleep(0.01)
-        print('\r{}% done...'.format(100))
-        """
+            print('\r{}% done. Waiting for tunnel to become available..'.format(0), end='', flush=True)
+            time.sleep(.5)
 
-        time.sleep(0.01)
-        print('The tunnel state is {}'.format(TUNNEL))
+        print('\rThe tunnel state is available')
 
         SETUP = {
           'PLAYBOOK_PATH': PLAYBOOK_PATH,
@@ -276,3 +374,4 @@ class CallbackModule(CallbackBase):
             print("DEBUG_SETUP_FILE={}".format(DEBUG_SETUP_FILE))
             with open(DEBUG_SETUP_FILE,'w') as f1:
                 f1.write(json.dumps(SETUP))
+
