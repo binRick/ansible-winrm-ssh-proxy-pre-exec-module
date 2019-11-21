@@ -16,10 +16,10 @@ for k in ['http_proxy','https_proxy']:
        del os.environ[k]
 
 DEBUG_MODE = True
-MONITOR_TUNNEL_INTERVAL = 5.0
+MONITOR_TUNNEL_INTERVAL = 1.0
 IPTABLES_POLL_LOCK_INTERVAL_SECONDS = 10
 CLEANUP_IPTABLES_RULES_ON_EXIT = True
-TUNNEL_AVAILABLE_ACTIVATION_DELAY = 1.0
+TUNNEL_AVAILABLE_ACTIVATION_DELAY = 3.5
 TUNNEL_AVAILABLE = threading.Event()
 TUNNEL = None
 LOCAL_ADDRESS = '127.150.190.200'
@@ -30,7 +30,7 @@ DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
            'remotes': [
                 {'host':os.environ['REMOTE_HOST'],'port':os.environ['REMOTE_PORT']},
-                {'host':'10.2.3.4', 'port': '29299'},
+#                {'host':'10.2.3.4', 'port': '29299'},
             ],
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
            'bastion': {'host':os.environ['BASTION_HOST'],'user':os.environ['BASTION_USER'],'port':os.environ['BASTION_PORT'],"ProxyCommand":os.environ['BASTION_PROXY_COMMAND']},
@@ -302,11 +302,14 @@ class CallbackModule(CallbackBase):
         if self.netstat['exit_code'] != 0:
             raise Exception('Unable to check locally listening ports :: {}'.format(self.OPEN_PORTS_CMD))    
 
+
+
         while SSH_TUNNEL_OBJECT['local']['port'] in self.netstat['ports']:
             SSH_TUNNEL_OBJECT['local']['port'] += 1
             if SSH_TUNNEL_OBJECT['local']['port'] > 65000:
                 raise Exception("Unable to allocate local port!")
 
+#        time.sleep(5.0)
 
         SCRIPT_CONTENTS = renderSshTunnelScript(SSH_TUNNEL_OBJECT)
         SCRIPT_PATH = tempfile.NamedTemporaryFile(suffix=TUNNEL_SCRIPT_SUFFIX,delete=AUTO_DELETE_TUNNEL_SCRIPTS).name
@@ -377,20 +380,17 @@ class CallbackModule(CallbackBase):
         print('self.hosts={}'.format(self.hosts))
 
 
-
-
         TUNNEL_THREAD = Thread(target=self.setupTunnelProcess, args=[self.hosts])
         TUNNEL_THREAD.daemon = True
+        TUNNEL_THREAD.start()
 
         TUNNEL_MONITOR_THREAD = Thread(target=self.monitorTunnelThread, args=[self.hosts])
         TUNNEL_MONITOR_THREAD.daemon = True
-
-        TUNNEL_THREAD.start()
         TUNNEL_MONITOR_THREAD.start()
 
         while not TUNNEL_AVAILABLE.wait(timeout=30):
             print('\r{}% done. Waiting for tunnel to become available..'.format(0), end='', flush=True)
-            time.sleep(.5)
+            time.sleep(0.1)
         print('\rThe tunnel state is available')
 
         SETUP = {
