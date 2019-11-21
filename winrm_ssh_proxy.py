@@ -19,7 +19,7 @@ DEBUG_MODE = True
 MONITOR_TUNNEL_INTERVAL = 5.0
 IPTABLES_POLL_LOCK_INTERVAL_SECONDS = 10
 CLEANUP_IPTABLES_RULES_ON_EXIT = True
-TUNNEL_AVAILABLE_ACTIVATION_DELAY = 0.1
+TUNNEL_AVAILABLE_ACTIVATION_DELAY = 1.0
 TUNNEL_AVAILABLE = threading.Event()
 TUNNEL = None
 LOCAL_ADDRESS = '127.150.190.200'
@@ -30,7 +30,7 @@ DEBUG_SETUP_FILE = '/tmp/debug_{}.json'.format(TUNNEL_SCRIPT_SUFFIX)
 SSH_TUNNEL_OBJECT = {
            'remotes': [
                 {'host':os.environ['REMOTE_HOST'],'port':os.environ['REMOTE_PORT']},
-#                {'host':'10.2.3.4', 'port': '2929'},
+                {'host':'10.2.3.4', 'port': '29299'},
             ],
            'local': {'host':LOCAL_ADDRESS,'port':PORT_RANGE_START},
            'bastion': {'host':os.environ['BASTION_HOST'],'user':os.environ['BASTION_USER'],'port':os.environ['BASTION_PORT'],"ProxyCommand":os.environ['BASTION_PROXY_COMMAND']},
@@ -163,22 +163,23 @@ class CallbackModule(CallbackBase):
         self.VARIABLE_MANAGER = None
 
 
-    def cleanupProcess(self):
-        if CLEANUP_IPTABLES_RULES_ON_EXIT:
+    def cleanupIptables(self):
             while len(self.getDnats()) > 0 or len(self.getMasquerades()) > 0:
                 DELETE_IPTABLES_CMDS = normalizeScriptContents(Environment().from_string(DELETE_DNATS_CMD).render(
                                             SSH_TUNNEL_OBJECT,
                                        ).strip()).splitlines()
                 for l in DELETE_IPTABLES_CMDS:
-                    #print("DELETE_IPTABLES_CMD={}".format(l))
+                    print("DELETE_IPTABLES_CMD={}".format(l))
                     proc = subprocess.Popen(l.split(' '), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, shell=False)
                     out, err = proc.communicate()
                     code = proc.wait()
                     if code != 0:
                         print("cmd={},out={},err={},code={}".format(l,out,err,code))
-                time.sleep(0.5)
+                time.sleep(0.1)
 
-
+    def cleanupProcess(self):
+        if CLEANUP_IPTABLES_RULES_ON_EXIT:
+            self.cleanupIptables()
         try:
             if DEBUG_MODE:
                 print("[cleanupProcess]")
@@ -283,6 +284,7 @@ class CallbackModule(CallbackBase):
 
     def setupTunnelProcess(self, HOSTS):
         print('[setupTunnelProcess] HOSTS: {}'.format(HOSTS))
+        #self.cleanupIptables()
         processStartTime = int(time.time())
         atexit.register(self.cleanupProcess)
 
