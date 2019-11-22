@@ -15,7 +15,7 @@ for k in ['http_proxy','https_proxy']:
     if k in os.environ.keys():
        del os.environ[k]
 
-DEBUG_MODE = True
+DEBUG_MODE = False
 MONITOR_TUNNEL_INTERVAL = 1.0
 IPTABLES_POLL_LOCK_INTERVAL_SECONDS = 10
 CLEANUP_IPTABLES_RULES_ON_EXIT = True
