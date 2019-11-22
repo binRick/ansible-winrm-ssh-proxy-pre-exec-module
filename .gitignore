@@ -6,3 +6,5 @@ insecureDevWrapper.sh
 *.retry
 test.sh
 dev.sh
+dev_mt.sh
+insecure*

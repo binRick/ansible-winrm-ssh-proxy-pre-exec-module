@@ -41,8 +41,13 @@ SSH_TUNNEL_OBJECT = {
 }
 
 TEMP_DROP_RULES_CMD = """
+{% if ACTION == 'D' %}
+{%set ba = '&&' %}
+{%else%}
+{%set ba = '||' %}
+{%endif%}
 {%for remote in remotes%}
-command sudo command iptables {{IPTABLES_COMMON_ARGS}} -L -n | grep '{{remote.host}}'|tr -s ' '| grep '^DROP tcp' |grep '0.0.0.0/0 {{remote.host}} tcp dpt:{{remote.port}}$' || \
+command sudo command iptables {{IPTABLES_COMMON_ARGS}} -L -n | grep '{{remote.host}}'|tr -s ' '| grep '^DROP tcp' |grep '0.0.0.0/0 {{remote.host}} tcp dpt:{{remote.port}}$' {{ba}} \
     command sudo command iptables {{IPTABLES_COMMON_ARGS}} -{{ACTION}} OUTPUT -d {{remote.host}} -p tcp --dport {{remote.port}} -j DROP
 {%endfor%}
 """
@@ -203,9 +208,9 @@ class CallbackModule(CallbackBase):
                 time.sleep(0.1)
 
     def cleanupProcess(self):
+        self.undropTrafficToHosts()
         if CLEANUP_IPTABLES_RULES_ON_EXIT:
             self.cleanupIptables()
-            self.undropTrafficToHosts()
         try:
             if DEBUG_MODE:
                 print("[cleanupProcess]")
