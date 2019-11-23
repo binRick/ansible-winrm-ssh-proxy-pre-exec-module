@@ -3,7 +3,6 @@ if [[ "$REMOTE_USER" == "" ]]; then
     REMOTE_USER='Administrator'
 fi
 if [[ "$REMOTE_HOST" == "" ]]; then
-    REMOTE_HOST='10.187.22.222'
     REMOTE_HOST='10.187.7.34'
 fi
 
@@ -16,4 +15,3 @@ ANSIBLE_DEBUG=0 \
         -k \
         -i ${REMOTE_HOST}, \
             test.yaml $@
-

@@ -15,7 +15,7 @@ for k in ['http_proxy','https_proxy']:
     if k in os.environ.keys():
        del os.environ[k]
 
-DEBUG_MODE = False
+DEBUG_MODE = True
 MONITOR_TUNNEL_INTERVAL = 1.0
 IPTABLES_POLL_LOCK_INTERVAL_SECONDS = 10
 IPTABLES_POLL_CHECK_LOCK_INTERVAL_MICROSECONDS = 10000
@@ -88,6 +88,7 @@ LocalCommand="echo OK > /tmp/lc"
 LogLevel="ERROR"
 command sudo command sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null
 SSH_OPTIONS="-q -oGatewayPorts=no -oExitOnForwardFailure=yes -oClearAllForwardings=no -oLogLevel=$LogLevel -oConnectTimeout=5 -oConnectionAttempts=5 -oForwardAgent=yes -oUserKnownHostsFile=/dev/null -oStrictHostKeyChecking=no -oControlMaster=no -oServerAliveInterval={{interval}} -oPort={{bastion.port}} -oUser=\\\"{{bastion.user}}\\\""
+SSH_OPTIONS_PROXY=\\\"\\\"
 SSH_OPTIONS_PROXY="-oProxyCommand=\\\"{{bastion.ProxyCommand}}\\\""
 SSH_OPTIONS_BATCH="-oBatchMode=yes -oPasswordAuthentication=no -oKbdInteractiveAuthentication=no -oChallengeResponseAuthentication=no"
 PROXY_SSH_CMD="command ssh $SSH_OPTIONS $SSH_OPTIONS_BATCH $SSH_OPTIONS_PROXY {%for remote in remotes%} -L{{local.host}}:{{local.port}}:{{remote.host}}:{{remote.port}}{%endfor%} {{bastion.host}}"
